@@ -11,16 +11,22 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type fileConfig struct {
-	NvidiaURL string `json:"nvidia_url"`
-	NvidiaKey string `json:"nvidia_key"`
+	NvidiaURL   string   `json:"nvidia_url"`
+	NvidiaKey   string   `json:"nvidia_key"`   // deprecated: use nvidia_keys
+	NvidiaKeys  []string `json:"nvidia_keys"`  // support multiple keys for rotation
+	KeyRotation string   `json:"key_rotation"` // round_robin, random, least_used (default: round_robin)
 }
 
 type serverConfig struct {
@@ -31,9 +37,88 @@ type serverConfig struct {
 	timeout        time.Duration
 	logBodyMax     int
 	logStreamPreviewMax int
+	keys           *keyManager
+}
+
+type keyManager struct {
+	keys       []string
+	rotation   string
+	currentIdx atomic.Int64
+	keyStats   []*keyStat // for least_used strategy
+	statsMu    sync.RWMutex
+}
+
+type keyStat struct {
+	inUse      atomic.Int64
+	lastUsed   atomic.Int64 // timestamp
+}
+
+func newKeyManager(keys []string, rotation string) *keyManager {
+	if len(keys) == 0 {
+		return nil
+	}
+	km := &keyManager{
+		keys:     keys,
+		rotation: rotation,
+		keyStats: make([]*keyStat, len(keys)),
+	}
+	for i := range km.keyStats {
+		km.keyStats[i] = &keyStat{}
+	}
+	return km
+}
+
+func (km *keyManager) getNextKey() string {
+	if km == nil || len(km.keys) == 0 {
+		return ""
+	}
+
+	switch km.rotation {
+	case "random":
+		idx := rand.Intn(len(km.keys))
+		return km.keys[idx]
+	case "least_used":
+		km.statsMu.Lock()
+		defer km.statsMu.Unlock()
+		var bestIdx int
+		bestInUse := km.keyStats[0].inUse.Load()
+		for i := 1; i < len(km.keyStats); i++ {
+			inUse := km.keyStats[i].inUse.Load()
+			if inUse < bestInUse {
+				bestInUse = inUse
+				bestIdx = i
+			} else if inUse == bestInUse {
+				// If tie, choose the one used least recently
+				if km.keyStats[i].lastUsed.Load() < km.keyStats[bestIdx].lastUsed.Load() {
+					bestIdx = i
+				}
+			}
+		}
+		km.keyStats[bestIdx].inUse.Add(1)
+		km.keyStats[bestIdx].lastUsed.Store(time.Now().Unix())
+		return km.keys[bestIdx]
+	default: // round_robin
+		idx := km.currentIdx.Add(1) % int64(len(km.keys))
+		return km.keys[idx]
+	}
+}
+
+func (km *keyManager) getKeyCount() int {
+	if km == nil {
+		return 0
+	}
+	return len(km.keys)
+}
+
+func (km *keyManager) releaseKey(idx int) {
+	if km != nil && km.rotation == "least_used" && idx >= 0 && idx < len(km.keyStats) {
+		km.keyStats[idx].inUse.Add(-1)
+	}
 }
 
 func main() {
+	checkGoVersion()
+
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("config error: %v", err)
@@ -62,6 +147,9 @@ func main() {
 
 	log.Printf("listening on %s", cfg.addr)
 	log.Printf("upstream: %s", cfg.upstreamURL)
+	if cfg.keys != nil {
+		log.Printf("using %d api key(s) with rotation: %s", cfg.keys.getKeyCount(), cfg.keys.rotation)
+	}
 	if cfg.serverAPIKey != "" {
 		log.Printf("inbound auth: enabled")
 	} else {
@@ -78,8 +166,35 @@ func loadConfig() (*serverConfig, error) {
 
 	addr := strings.TrimSpace(envOr("ADDR", ":3001"))
 	upstreamURL := strings.TrimSpace(envOr("UPSTREAM_URL", fc.NvidiaURL))
-	providerAPIKey := strings.TrimSpace(envOr("PROVIDER_API_KEY", fc.NvidiaKey))
 	serverAPIKey := strings.TrimSpace(envOr("SERVER_API_KEY", ""))
+
+	// Handle multiple keys with rotation
+	var keys []string
+	keyRotation := strings.TrimSpace(envOr("KEY_ROTATION", fc.KeyRotation))
+	if keyRotation == "" {
+		keyRotation = "round_robin"
+	}
+
+	// Priority: PROVIDER_API_KEYS env > PROVIDER_API_KEY env > nvidia_keys config > nvidia_key config
+	if envKeys := strings.TrimSpace(os.Getenv("PROVIDER_API_KEYS")); envKeys != "" {
+		// Parse comma-separated keys
+		splitKeys := strings.Split(envKeys, ",")
+		for _, k := range splitKeys {
+			if k = strings.TrimSpace(k); k != "" {
+				keys = append(keys, k)
+			}
+		}
+	} else if envKey := strings.TrimSpace(envOr("PROVIDER_API_KEY", "")); envKey != "" {
+		keys = append(keys, envKey)
+	} else if len(fc.NvidiaKeys) > 0 {
+		keys = fc.NvidiaKeys
+	} else if fc.NvidiaKey != "" {
+		keys = append(keys, fc.NvidiaKey)
+	}
+
+	if len(keys) == 0 {
+		return nil, errors.New("missing nvidia_key or nvidia_keys in config.json (or PROVIDER_API_KEY/PROVIDER_API_KEYS env)")
+	}
 
 	timeout := 5 * time.Minute
 	if raw := strings.TrimSpace(envOr("UPSTREAM_TIMEOUT_SECONDS", "")); raw != "" {
@@ -111,17 +226,24 @@ func loadConfig() (*serverConfig, error) {
 	if upstreamURL == "" {
 		return nil, errors.New("missing nvidia_url in config.json (or UPSTREAM_URL)")
 	}
-	if providerAPIKey == "" {
-		return nil, errors.New("missing nvidia_key in config.json (or PROVIDER_API_KEY)")
+
+	// Validate key rotation strategy
+	switch keyRotation {
+	case "round_robin", "random", "least_used":
+		// valid
+	default:
+		return nil, fmt.Errorf("invalid key_rotation: %q (must be: round_robin, random, or least_used)", keyRotation)
 	}
+
 	return &serverConfig{
 		addr:           addr,
 		upstreamURL:    upstreamURL,
-		providerAPIKey: providerAPIKey,
+		providerAPIKey: keys[0], // fallback for compatibility
 		serverAPIKey:   serverAPIKey,
 		timeout:        timeout,
 		logBodyMax:     logBodyMax,
 		logStreamPreviewMax: logStreamPreviewMax,
+		keys:           newKeyManager(keys, keyRotation),
 	}, nil
 }
 
@@ -225,67 +347,179 @@ func checkInboundAuth(r *http.Request, expected string) bool {
 }
 
 func doUpstreamJSON(ctx context.Context, cfg *serverConfig, openaiReq openaiChatCompletionRequest) ([]byte, *http.Response, error) {
-	bodyBytes, err := json.Marshal(openaiReq)
-	if err != nil {
-		return nil, nil, err
-	}
+	var lastErr error
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.upstreamURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, nil, err
-	}
+	for attempt := 0; attempt < 5; attempt++ {
+		apiKey := cfg.providerAPIKey
+		keyIdx := -1
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+cfg.providerAPIKey)
+		if cfg.keys != nil {
+			apiKey = cfg.keys.getNextKey()
+			// Find key index for least_used release
+			for i, k := range cfg.keys.keys {
+				if k == apiKey {
+					keyIdx = i
+					break
+				}
+			}
+		}
 
-	client := &http.Client{Timeout: cfg.timeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, nil, err
-	}
+		bodyBytes, err := json.Marshal(openaiReq)
+		if err != nil {
+			if keyIdx >= 0 {
+				cfg.keys.releaseKey(keyIdx)
+			}
+			return nil, nil, err
+		}
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.upstreamURL, bytes.NewReader(bodyBytes))
+		if err != nil {
+			if keyIdx >= 0 {
+				cfg.keys.releaseKey(keyIdx)
+			}
+			return nil, nil, err
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+
+		client := &http.Client{Timeout: cfg.timeout}
+		resp, err := client.Do(req)
+		if err != nil {
+			if keyIdx >= 0 {
+				cfg.keys.releaseKey(keyIdx)
+			}
+			lastErr = err
+			continue
+		}
+
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			resp.Body.Close()
+			if keyIdx >= 0 {
+				cfg.keys.releaseKey(keyIdx)
+			}
+			return nil, nil, err
+		}
 		_ = resp.Body.Close()
-		return nil, nil, err
+		// Re-wrap body so caller can optionally read again after status checks.
+		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+
+		// Check for 429 (Rate Limit) error
+		if resp.StatusCode == 429 {
+			lastErr = fmt.Errorf("rate limited (429) on attempt %d, trying next key", attempt+1)
+			if keyIdx >= 0 {
+				cfg.keys.releaseKey(keyIdx)
+			}
+			// If we have more keys available, try next
+			if cfg.keys != nil && len(cfg.keys.keys) > 1 {
+				time.Sleep(time.Duration(100+attempt*100) * time.Millisecond) // exponential backoff
+				continue
+			}
+			// If only one key, wait longer and retry
+			time.Sleep(time.Duration(1+attempt) * time.Second)
+			continue
+		}
+
+		// Success or other error, return as-is
+		return respBody, resp, nil
 	}
-	_ = resp.Body.Close()
-	// Re-wrap body so caller can optionally read again after status checks.
-	resp.Body = io.NopCloser(bytes.NewReader(respBody))
-	return respBody, resp, nil
+
+	// All attempts failed
+	return nil, nil, fmt.Errorf("upstream request failed after 5 attempts: %w", lastErr)
 }
 
 func proxyStream(w http.ResponseWriter, r *http.Request, cfg *serverConfig, reqID string, openaiReq openaiChatCompletionRequest) error {
 	openaiReq.Stream = true
 
-	bodyBytes, err := json.Marshal(openaiReq)
-	if err != nil {
-		return err
-	}
-	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, cfg.upstreamURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return err
-	}
-	upReq.Header.Set("Content-Type", "application/json")
-	upReq.Header.Set("Authorization", "Bearer "+cfg.providerAPIKey)
+	var lastErr error
+	var upResp *http.Response
+	var keyIdx int = -1
 
-	client := &http.Client{Timeout: 0} // streaming: no client timeout
-	upResp, err := client.Do(upReq)
-	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, "upstream_request_failed")
-		return err
-	}
-	defer upResp.Body.Close()
+	for attempt := 0; attempt < 5; attempt++ {
+		apiKey := cfg.providerAPIKey
+		keyIdx = -1
 
-	log.Printf("[%s] upstream status=%d (stream)", reqID, upResp.StatusCode)
-	if upResp.StatusCode < 200 || upResp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(upResp.Body)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(upResp.StatusCode)
-		_, _ = w.Write(raw)
-		logForwardedUpstreamBody(reqID, cfg, raw)
-		return fmt.Errorf("upstream status %d", upResp.StatusCode)
+		if cfg.keys != nil {
+			apiKey = cfg.keys.getNextKey()
+			for i, k := range cfg.keys.keys {
+				if k == apiKey {
+					keyIdx = i
+					break
+				}
+			}
+		}
+
+		bodyBytes, err := json.Marshal(openaiReq)
+		if err != nil {
+			if keyIdx >= 0 {
+				cfg.keys.releaseKey(keyIdx)
+			}
+			return err
+		}
+
+		upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, cfg.upstreamURL, bytes.NewReader(bodyBytes))
+		if err != nil {
+			if keyIdx >= 0 {
+				cfg.keys.releaseKey(keyIdx)
+			}
+			return err
+		}
+		upReq.Header.Set("Content-Type", "application/json")
+		upReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+		client := &http.Client{Timeout: 0} // streaming: no client timeout
+		upRespTemp, err := client.Do(upReq)
+		if err != nil {
+			if keyIdx >= 0 {
+				cfg.keys.releaseKey(keyIdx)
+			}
+			lastErr = err
+			continue
+		}
+
+		log.Printf("[%s] upstream status=%d (stream, attempt %d)", reqID, upRespTemp.StatusCode, attempt+1)
+
+		// Check for 429 error
+		if upRespTemp.StatusCode == 429 {
+			upRespTemp.Body.Close()
+			lastErr = fmt.Errorf("rate limited (429) on attempt %d, trying next key", attempt+1)
+			if keyIdx >= 0 {
+				cfg.keys.releaseKey(keyIdx)
+			}
+			time.Sleep(time.Duration(100+attempt*100) * time.Millisecond)
+			continue
+		}
+
+		// Error but not 429 - propagate as-is
+		if upRespTemp.StatusCode < 200 || upRespTemp.StatusCode >= 300 {
+			raw, _ := io.ReadAll(upRespTemp.Body)
+			upRespTemp.Body.Close()
+			if keyIdx >= 0 {
+				cfg.keys.releaseKey(keyIdx)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(upRespTemp.StatusCode)
+			_, _ = w.Write(raw)
+			logForwardedUpstreamBody(reqID, cfg, raw)
+			return fmt.Errorf("upstream status %d, body=%s", upRespTemp.StatusCode, string(raw))
+		}
+
+		// Success - set up for streaming
+		upResp = upRespTemp
+		break
 	}
+
+	if upResp == nil {
+		return fmt.Errorf("upstream request failed after 5 attempts: %w", lastErr)
+	}
+
+	defer func() {
+		upResp.Body.Close()
+		if keyIdx >= 0 && cfg.keys.rotation == "least_used" {
+			cfg.keys.releaseKey(keyIdx)
+		}
+	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1186,4 +1420,20 @@ func takeFirstRunes(s string, max int) string {
 		return s
 	}
 	return string(r[:max])
+}
+
+func checkGoVersion() {
+	version := runtime.Version()
+	// runtime.Version() returns strings like "go1.22.0", "go1.21.0", "go1.20"
+	// We need to parse the major and minor version
+	var major, minor int
+	if _, err := fmt.Sscanf(version, "go%d.%d", &major, &minor); err != nil {
+		log.Printf("warning: unable to parse Go version %q, proceeding anyway", version)
+		return
+	}
+
+	// Require Go 1.22 or later
+	if major < 1 || (major == 1 && minor < 22) {
+		log.Fatalf("fatal: Go 1.22 or later is required (detected: %s). Please upgrade Go to run this proxy.", version)
+	}
 }

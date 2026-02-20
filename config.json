@@ -1,4 +1,5 @@
 {
   "nvidia_url": "https://integrate.api.nvidia.com/v1/chat/completions",
-  "nvidia_key": "nvapi-api-key"
+  "nvidia_keys": ["key1", "key2", "key3"],
+  "key_rotation": "round_robin"
 }
