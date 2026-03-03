@@ -65,7 +65,7 @@ export ANTHROPIC_DEFAULT_OPUS_MODEL=z-ai/glm4.7
 claude
 ```
 
-use zai/glm4.7 model
+use minimaxai/minimax-m2.1 model
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:3001
 export ANTHROPIC_AUTH_TOKEN=nvapi-api-key
