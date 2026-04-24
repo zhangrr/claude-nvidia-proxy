@@ -34,24 +34,24 @@ go run .
 
 ## CLAUDE CODE
 
-use zai/glm5 model
+use moonshotai/kimi-k2-thinking model
+```
+export ANTHROPIC_BASE_URL=http://localhost:3001
+export ANTHROPIC_AUTH_TOKEN=nvapi-api-key
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=moonshotai/kimi-k2-thinking
+export ANTHROPIC_DEFAULT_SONNET_MODEL=moonshotai/kimi-k2-thinking
+export ANTHROPIC_DEFAULT_OPUS_MODEL=moonshotai/kimi-k2-thinking
+```
+
+use minimaxai/minimax-m2.7 model
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:3001
 export ANTHROPIC_AUTH_TOKEN=nvapi-api-key
-export ANTHROPIC_DEFAULT_HAIKU_MODEL=z-ai/glm5
-export ANTHROPIC_DEFAULT_SONNET_MODEL=z-ai/glm5
-export ANTHROPIC_DEFAULT_OPUS_MODEL=z-ai/glm5
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=minimaxai/minimax-m2.7
+export ANTHROPIC_DEFAULT_SONNET_MODEL=minimaxai/minimax-m2.7
+export ANTHROPIC_DEFAULT_OPUS_MODEL=minimaxai/minimax-m2.7
 
 claude
-```
-
-use moonshotai/kimi-k2.5 model
-```
-export ANTHROPIC_BASE_URL=http://localhost:3001
-export ANTHROPIC_AUTH_TOKEN=nvapi-api-key
-export ANTHROPIC_DEFAULT_HAIKU_MODEL=moonshotai/kimi-k2.5
-export ANTHROPIC_DEFAULT_SONNET_MODEL=moonshotai/kimi-k2.5
-export ANTHROPIC_DEFAULT_OPUS_MODEL=moonshotai/kimi-k2.5
 ```
 
 use zai/glm4.7 model
@@ -65,13 +65,13 @@ export ANTHROPIC_DEFAULT_OPUS_MODEL=z-ai/glm4.7
 claude
 ```
 
-use zai/glm4.7 model
+use deepseek-ai/deepseek-v3.2 model
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:3001
 export ANTHROPIC_AUTH_TOKEN=nvapi-api-key
-export ANTHROPIC_DEFAULT_HAIKU_MODEL=minimaxai/minimax-m2.1
-export ANTHROPIC_DEFAULT_SONNET_MODEL=minimaxai/minimax-m2.1
-export ANTHROPIC_DEFAULT_OPUS_MODEL=minimaxai/minimax-m2.1
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-ai/deepseek-v3.2
+export ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-ai/deepseek-v3.2
+export ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-ai/deepseek-v3.2
 
 claude
 ```
