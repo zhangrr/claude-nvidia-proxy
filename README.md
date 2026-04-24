@@ -1,7 +1,7 @@
 # claude-nvidia-proxy (Go)
 
 Go https://build.nvidia.com/explore/discover, register an account, and generate an API key. 
-NVIDIA provides several models, like moonshotai/kimi-k2.5、z-ai/glm4.7、z-ai/glm5 and minimaxai/minimax-m2.1
+NVIDIA provides several models, like moonshotai/kimi-k2-thinking、minimaxai/minimax-m2.7、z-ai/glm4.7 and deepseek-ai/deepseek-v3.2，all is free.
 Then, configure the config.json file and run the program, ensuring it listens on port 3001.
 
 Expose `POST /v1/messages` (Anthropic/Claude style), convert to OpenAI Chat Completions, and proxy to NVIDIA (configured via `config.json`).
@@ -41,6 +41,8 @@ export ANTHROPIC_AUTH_TOKEN=nvapi-api-key
 export ANTHROPIC_DEFAULT_HAIKU_MODEL=moonshotai/kimi-k2-thinking
 export ANTHROPIC_DEFAULT_SONNET_MODEL=moonshotai/kimi-k2-thinking
 export ANTHROPIC_DEFAULT_OPUS_MODEL=moonshotai/kimi-k2-thinking
+
+claude
 ```
 
 use minimaxai/minimax-m2.7 model
